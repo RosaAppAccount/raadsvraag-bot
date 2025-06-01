@@ -1,79 +1,59 @@
 import os
-import time
+import re
 import requests
 import fitz  # PyMuPDF
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.options import Options
-from webdriver_manager.chrome import ChromeDriverManager
+from bs4 import BeautifulSoup
 
-BASE_URL = "https://rotterdamraad.bestuurlijkeinformatie.nl/Reports/Details/da9b533f-5f24-4f51-8567-19fe410f15d4"
+BASE_URL = "https://rotterdamraad.bestuurlijkeinformatie.nl"
+START_URL = f"{BASE_URL}/Reports/Details/da9b533f-5f24-4f51-8567-19fe410f15d4"
 DOWNLOAD_DIR = "downloaded_documents"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-def get_chrome_driver():
-    chrome_options = Options()
-    chrome_options.binary_location = "/usr/bin/chromium-browser"  # Speciaal voor Streamlit Cloud
-    chrome_options.add_argument("--headless")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--window-size=1920,1080")
-    
-    return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
-
 def find_latest_question_and_summarize(raadslid_naam):
-    # Start headless browser
-    driver = get_chrome_driver()
-    wait = WebDriverWait(driver, 20)
+    # HTML ophalen
+    response = requests.get(START_URL)
+    if response.status_code != 200:
+        raise Exception(f"Kan de pagina niet laden: {response.status_code}")
+    
+    soup = BeautifulSoup(response.text, "html.parser")
 
-    # Navigeer naar hoofdurl
-    driver.get(BASE_URL)
-    time.sleep(5)
+    # Zoek naar links met de naam van het raadslid
+    report_links = soup.select(".report-children a")
+    target_link = None
 
-    # Scroll zodat JS alles laadt
-    driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-    time.sleep(2)
-
-    # Zoek alle links op de pagina
-    items = driver.find_elements(By.CSS_SELECTOR, ".report-children a")
-    target_url = None
-    for item in items:
-        if "Schriftelijke" in item.text and raadslid_naam in item.text:
-            target_url = item.get_attribute("href")
+    for link in report_links:
+        text = link.get_text()
+        if "Schriftelijke" in text and raadslid_naam in text:
+            target_link = BASE_URL + link["href"]
             break
 
-    if not target_url:
-        driver.quit()
-        raise Exception(f"❌ Geen schriftelijke vraag gevonden voor {raadslid_naam}")
+    if not target_link:
+        raise Exception(f"Geen schriftelijke vraag gevonden voor: {raadslid_naam}")
 
-    # Navigeer naar de gevonden vraag
-    driver.get(target_url)
-    time.sleep(5)
+    # Detailpagina ophalen
+    detail_resp = requests.get(target_link)
+    detail_soup = BeautifulSoup(detail_resp.text, "html.parser")
 
-    def download_docs(field_label):
-        try:
-            section = wait.until(EC.presence_of_element_located((By.XPATH, f"//div[h4[contains(text(), '{field_label}')]]")))
-            links = section.find_elements(By.TAG_NAME, "a")
-            files = []
-            for link in links:
-                file_url = link.get_attribute("href")
-                filename = os.path.join(DOWNLOAD_DIR, link.text.strip().replace("/", "_"))
-                r = requests.get(file_url)
-                with open(filename, "wb") as f:
-                    f.write(r.content)
-                files.append(filename)
-            return files
-        except Exception:
-            return []
+    # Documenten ophalen uit secties
+    def get_documents_by_section(label):
+        docs = []
+        sections = detail_soup.find_all("div", class_="report-section")
+        for section in sections:
+            header = section.find("h4")
+            if header and label.lower() in header.get_text().lower():
+                for a in section.find_all("a", href=True):
+                    doc_url = BASE_URL + a["href"]
+                    filename = os.path.join(DOWNLOAD_DIR, a.get_text().strip().replace("/", "_"))
+                    file_resp = requests.get(doc_url)
+                    with open(filename, "wb") as f:
+                        f.write(file_resp.content)
+                    docs.append(filename)
+        return docs
 
-    hoofddoc = download_docs("Hoofddocument")
-    bijlagen = download_docs("Bijlagen")
-    driver.quit()
+    hoofddoc = get_documents_by_section("Hoofddocument")
+    bijlagen = get_documents_by_section("Bijlagen")
 
+    # Samenvatten
     def summarize_pdf(pdf_path, max_chars=1000):
         doc = fitz.open(pdf_path)
         text = ""
@@ -82,9 +62,8 @@ def find_latest_question_and_summarize(raadslid_naam):
             if len(text) > max_chars:
                 break
         doc.close()
-        return text[:max_chars].strip() + "..."
+        return text.strip()[:max_chars] + "..."
 
-    # Samenvattingen bouwen
     summaries = []
     for path in hoofddoc + bijlagen:
         summaries.append({
