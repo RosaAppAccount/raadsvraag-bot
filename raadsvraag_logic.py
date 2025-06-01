@@ -7,29 +7,38 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.options import Options
 from webdriver_manager.chrome import ChromeDriverManager
 
 BASE_URL = "https://rotterdamraad.bestuurlijkeinformatie.nl/Reports/Details/da9b533f-5f24-4f51-8567-19fe410f15d4"
 DOWNLOAD_DIR = "downloaded_documents"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
+def get_chrome_driver():
+    chrome_options = Options()
+    chrome_options.binary_location = "/usr/bin/chromium-browser"  # Speciaal voor Streamlit Cloud
+    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--window-size=1920,1080")
+    
+    return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
+
 def find_latest_question_and_summarize(raadslid_naam):
-    # Start browser
-    options = webdriver.ChromeOptions()
-    options.add_argument("--headless")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--no-sandbox")
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+    # Start headless browser
+    driver = get_chrome_driver()
     wait = WebDriverWait(driver, 20)
 
-    # Ga naar hoofdpagina
+    # Navigeer naar hoofdurl
     driver.get(BASE_URL)
     time.sleep(5)
 
+    # Scroll zodat JS alles laadt
     driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
     time.sleep(2)
 
-    # Zoek vraag van raadslid
+    # Zoek alle links op de pagina
     items = driver.find_elements(By.CSS_SELECTOR, ".report-children a")
     target_url = None
     for item in items:
@@ -39,9 +48,9 @@ def find_latest_question_and_summarize(raadslid_naam):
 
     if not target_url:
         driver.quit()
-        raise Exception(f"Geen schriftelijke vraag gevonden voor {raadslid_naam}")
+        raise Exception(f"❌ Geen schriftelijke vraag gevonden voor {raadslid_naam}")
 
-    # Ga naar detailpagina
+    # Navigeer naar de gevonden vraag
     driver.get(target_url)
     time.sleep(5)
 
@@ -63,7 +72,6 @@ def find_latest_question_and_summarize(raadslid_naam):
 
     hoofddoc = download_docs("Hoofddocument")
     bijlagen = download_docs("Bijlagen")
-
     driver.quit()
 
     def summarize_pdf(pdf_path, max_chars=1000):
@@ -76,7 +84,7 @@ def find_latest_question_and_summarize(raadslid_naam):
         doc.close()
         return text[:max_chars].strip() + "..."
 
-    # Genereer samenvattingen
+    # Samenvattingen bouwen
     summaries = []
     for path in hoofddoc + bijlagen:
         summaries.append({
