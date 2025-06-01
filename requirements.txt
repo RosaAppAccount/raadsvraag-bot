@@ -1,8 +1,4 @@
-selenium
-webdriver-manager
-requests
-PyMuPDF
 streamlit
-
-# nodig voor Chrome op Streamlit Cloud
-chromium
+requests
+beautifulsoup4
+PyMuPDF
