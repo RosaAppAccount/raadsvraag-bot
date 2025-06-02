@@ -1,5 +1,3 @@
-# app.py
-
 import streamlit as st
 from raadsvraag_logic import get_raadsleden_labels, find_latest_question_and_summarize
 
@@ -31,7 +29,6 @@ with st.spinner("Lijst met raadslid‐labels ophalen…"):
         st.error(f"Kon de lijst met labels niet ophalen: {e}")
         st.stop()
 
-# Als er écht geen labels zijn, stoppen we
 if len(raadsleden_labels) == 0:
     st.error("Er zijn geen raadsleden met “Schriftelijke vraag” gevonden op de startpagina.")
     st.stop()
@@ -50,7 +47,7 @@ keuze_label = st.selectbox(
 st.write("")  # lege regel voor spacing
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Stap 2: Als de gebruiker op de knop klikt -> samenvattingen tonen
+# Stap 2: Als de gebruiker op de knop klikt → samenvattingen tonen
 # ─────────────────────────────────────────────────────────────────────────────
 
 if st.button("🔍 Haal laatste raadsvraag op"):
