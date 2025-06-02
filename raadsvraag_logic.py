@@ -1,117 +1,110 @@
+# raadsvraag_logic.py
+
 import os
-import time
+import re
 import requests
-import fitz  # PyMuPDF
+import fitz   # PyMuPDF
 from bs4 import BeautifulSoup
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Configuratie
 # ─────────────────────────────────────────────────────────────────────────────
 
-BASE_URL = "https://rotterdamraad.bestuurlijkeinformatie.nl"
+BASE_URL   = "https://rotterdamraad.bestuurlijkeinformatie.nl"
 START_PATH = "/Reports/Details/da9b533f-5f24-4f51-8567-19fe410f15d4"
-START_URL = BASE_URL + START_PATH
+START_URL  = BASE_URL + START_PATH
 
-# Map voor tijdelijke opslag van gedownloade PDF’s
 DOWNLOAD_DIR = "downloaded_documents"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 
-def _get_selenium_driver():
+def get_raadsleden_labels() -> list[str]:
     """
-    Geeft een headless Chrome-webdriver terug. Op Streamlit Cloud wijst de binary_location
-    naar de geïnstalleerde headless chromium ("/usr/bin/chromium-browser"). Lokaal wordt
-    via webdriver_manager automatisch ChromeDriver opgehaald.
+    Haalt met requests + BeautifulSoup alle <a>-links op onder '.report-children a'
+    waarvoor de linktekst 'Schriftelijke vraag' bevat. Knipt telkens het stuk ná
+    'Schriftelijke vraag' eruit (inclusief onderwerp), en retourneert een gesorteerde
+    lijst van strings zoals:
+      ['de Waard, J.M.D. – Voorzieningen jeugd', 'Groningen, D. van – Energietransitie', …].
     """
-    options = webdriver.ChromeOptions()
-    # Op Streamlit Cloud is headless chromium beschikbaar op dit pad:
-    options.binary_location = "/usr/bin/chromium-browser"
-    options.add_argument("--headless")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--window-size=1920,1080")
-    return webdriver.Chrome(
-        service=Service(ChromeDriverManager().install()),
-        options=options
-    )
+    resp = requests.get(START_URL)
+    if resp.status_code != 200:
+        raise Exception(f"Kon startpagina niet laden (status {resp.status_code})")
 
+    soup = BeautifulSoup(resp.text, "html.parser")
 
-def get_raadsleden_labels():
-    """
-    Haalt met Selenium alle linkteksten op onder '.report-children a' waarin 'Schriftelijke vraag'
-    voorkomt, en knipt het deel ná 'Schriftelijke vraag' eruit. Retourneert een gesorteerde lijst
-    zoals ['de Waard, J.M.D. – Voorzieningen jeugd', 'Groningen, D. van – Energietransitie', …].
-    """
-    driver = _get_selenium_driver()
-    driver.get(START_URL)
-    # Kort pauzeren zodat eventuele JavaScript de linklijst kan inladen
-    time.sleep(4)
-    driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-    time.sleep(2)
-
-    items = driver.find_elements(By.CSS_SELECTOR, ".report-children a")
+    # Vind alle <a> binnen het element met class "report-children"
+    items = soup.select(".report-children a")
     labels = set()
 
-    for link in items:
-        tekst = link.text.strip()
+    for a in items:
+        tekst = a.get_text(strip=True)
         if "Schriftelijke vraag" in tekst:
+            # Knip het stuk na "Schriftelijke vraag" weg
             na = tekst.split("Schriftelijke vraag", 1)[1].strip()
             if na:
                 labels.add(na)
 
-    driver.quit()
     return sorted(labels)
 
 
-def find_latest_question_and_summarize(raadslid_label: str):
+def find_latest_question_and_summarize(raadslid_label: str) -> dict:
     """
-    1) Gebruikt Selenium om exact de <a>-link te vinden met tekst 'Schriftelijke vraag {raadslid_label}'.
-    2) Haalt de detailpagina op via requests.
-    3) Downloadt alle PDF’s uit secties 'Hoofddocument' en 'Bijlagen' naar DOWNLOAD_DIR.
-    4) Leest elke PDF met PyMuPDF en genereert een korte samenvatting (~1000 tekens).
+    1. In de HTML van START_URL zoekt deze functie exact naar een <a>-link met
+       link.text == f"Schriftelijke vraag {raadslid_label}".
+    2. Haalt de bijbehorende detail-URL op (href attribuut).
+    3. Downloadt alle PDF’s uit de secties 'Hoofddocument' en 'Bijlagen' naar DOWNLOAD_DIR.
+    4. Leest elke PDF met PyMuPDF en geeft per bestand de eerste ~1000 tekens terug.
+
     Retourneert een dict:
-        {"summaries": [ {"filename": "...", "summary": "..."}, … ] }
+      {
+        "summaries": [
+          {"filename": "Hoofddocument.pdf", "summary": "…eerste 1000 tekens…"},
+          {"filename": "Bijlage1.pdf",       "summary": "…eerste 1000 tekens…"},
+          …
+        ]
+      }
+
+    Als de link niet gevonden wordt, wordt er een Exception gegooid.
     """
 
-    # ── Stap A: vind de detail-URL met Selenium ─────────────────────────────────
-    driver = _get_selenium_driver()
-    driver.get(START_URL)
-    time.sleep(4)
-    driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-    time.sleep(2)
+    # ── A) Zoek in de startpagina naar de exacte link "Schriftelijke vraag {raadslid_label}"
+    resp = requests.get(START_URL)
+    if resp.status_code != 200:
+        raise Exception(f"Kon startpagina niet laden (status {resp.status_code})")
 
-    items = driver.find_elements(By.CSS_SELECTOR, ".report-children a")
+    soup = BeautifulSoup(resp.text, "html.parser")
+    items = soup.select(".report-children a")
+
     target_link = None
     gezochte_tekst = f"Schriftelijke vraag {raadslid_label}"
 
-    for link in items:
-        if link.text.strip() == gezochte_tekst:
-            href = link.get_attribute("href").strip()
+    for a in items:
+        if a.get_text(strip=True) == gezochte_tekst:
+            href = a.get("href", "").strip()
             if href:
-                target_link = href
+                # Bouw absolute URL (soms is href relatieve pad)
+                if href.startswith("http"):
+                    target_link = href
+                else:
+                    target_link = BASE_URL + href
             break
-
-    driver.quit()
 
     if not target_link:
         raise Exception(f"Geen schriftelijke vraag gevonden voor: {raadslid_label}")
 
-    # ── Stap B: detailpagina ophalen met requests ────────────────────────────────
+    # ── B) Haal detailpagina op en parse met BeautifulSoup
     detail_resp = requests.get(target_link)
     if detail_resp.status_code != 200:
-        raise Exception(f"Kon detailpagina niet laden (status {detail_resp.status_code}).")
+        raise Exception(f"Kon detailpagina niet laden (status {detail_resp.status_code})")
+
     detail_soup = BeautifulSoup(detail_resp.text, "html.parser")
 
     def _download_docs_in_section(label: str) -> list[str]:
         """
-        Zoekt in detail_soup naar <div class="report-section"> waarin de <h4> de opgegeven 'label'
-        (bijv. 'Hoofddocument' of 'Bijlagen') bevat, en downloadt alle <a href="…">-links in die sectie.
-        Retourneert een lijst met lokale bestandsnamen.
+        Zoekt in detail_soup naar <div class="report-section"> waarvan de <h4>
+        de opgegeven 'label' (bijv. 'Hoofddocument' of 'Bijlagen') bevat. Downloadt
+        alle <a href="…">-links in die sectie en schrijft ze naar DOWNLOAD_DIR.
+        Retourneert de lijst met lokale bestandsnamen.
         """
         bestanden = []
         secties = detail_soup.find_all("div", class_="report-section")
@@ -120,7 +113,14 @@ def find_latest_question_and_summarize(raadslid_label: str):
             header = sectie.find("h4")
             if header and label.lower() in header.get_text(strip=True).lower():
                 for a_tag in sectie.find_all("a", href=True):
-                    doc_url = BASE_URL + a_tag["href"]
+                    # De <a> bevat meestal een relatieve URL naar PDF
+                    rel_url = a_tag["href"]
+                    if rel_url.startswith("http"):
+                        doc_url = rel_url
+                    else:
+                        doc_url = BASE_URL + rel_url
+
+                    # Bouw veilige bestandsnaam
                     naam = a_tag.get_text(strip=True).replace("/", "_").replace("\\", "_")
                     lokaal_pad = os.path.join(DOWNLOAD_DIR, naam)
 
@@ -131,22 +131,24 @@ def find_latest_question_and_summarize(raadslid_label: str):
                             f_out.write(r.content)
                         bestanden.append(lokaal_pad)
                     except Exception:
+                        # Bij downloadfout overslaan we dit bestand
                         continue
 
         return bestanden
 
-    # Download 'Hoofddocument' en 'Bijlagen'
+    # Download alle documenten uit secties "Hoofddocument" en "Bijlagen"
     hoofddocs = _download_docs_in_section("Hoofddocument")
-    bijlagen = _download_docs_in_section("Bijlagen")
-    alle_pdfs = hoofddocs + bijlagen
+    bijlagen  = _download_docs_in_section("Bijlagen")
+    alle_paden = hoofddocs + bijlagen
 
-    def _summarize_pdf(pdf_pad: str, max_chars: int = 1000) -> str:
+    def _summarize_pdf(pdf_path: str, max_chars: int = 1000) -> str:
         """
-        Opent de PDF met PyMuPDF, leest pagina voor pagina tekst uit tot max_chars bereikt is,
-        en geeft de tekst (plus '…' indien afgekapt) terug.
+        Opent het PDF-bestand met PyMuPDF (fitz), leest pagina voor pagina tekst uit
+        totdat max_chars is bereikt. Retourneert de eerste max_chars tekens (plus "...")
+        of de volledige tekst als hij korter is dan max_chars.
         """
         try:
-            doc = fitz.open(pdf_pad)
+            doc = fitz.open(pdf_path)
             tekst = ""
             for pagina in doc:
                 tekst += pagina.get_text()
@@ -157,10 +159,11 @@ def find_latest_question_and_summarize(raadslid_label: str):
         except Exception as e:
             return f"(Kon niet samenvatten: {e})"
 
+    # Bouw de uiteindelijke lijst met samenvattingen
     samenvattingen = []
-    for pad in alle_pdfs:
+    for pad in alle_paden:
         fname = os.path.basename(pad)
-        smry = _summarize_pdf(pad)
+        smry  = _summarize_pdf(pad)
         samenvattingen.append({"filename": fname, "summary": smry})
 
     return {"summaries": samenvattingen}
@@ -170,7 +173,7 @@ def find_latest_question_and_summarize(raadslid_label: str):
 # Optioneel: lokaal testen van deze module
 # ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    print("Beschikbare raadsledenlabels met 'Schriftelijke vraag':")
+    print("Beschikbare labels met 'Schriftelijke vraag':")
     try:
         labels = get_raadsleden_labels()
         for lbl in labels:
@@ -178,7 +181,7 @@ if __name__ == "__main__":
     except Exception as e:
         print("Fout bij ophalen labels:", e)
 
-    # Als voorbeeld kun je hier een label uit de lijst invullen:
-    # result = find_latest_question_and_summarize("Groningen, D. van – Energietransitie")
+    # Voorbeeld (kopieer een label uit bovenstaande lijst):
+    # result = find_latest_question_and_summarize("de Waard, J.M.D. – Voorzieningen jeugd")
     # print(result)
     pass
